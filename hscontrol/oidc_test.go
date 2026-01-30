@@ -1,6 +1,9 @@
 package hscontrol
 
 import (
+	"crypto/tls"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/juanfont/headscale/hscontrol/types"
@@ -167,6 +170,85 @@ func TestDoOIDCAuthorization(t *testing.T) {
 			err := doOIDCAuthorization(tC.cfg, tC.claims)
 			if ((err != nil) && !tC.wantErr) || ((err == nil) && tC.wantErr) {
 				t.Errorf("bad authorization: %s > want=%v | got=%v", tC.name, tC.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestSetCSRFCookie(t *testing.T) {
+	tests := []struct {
+		name        string
+		useTLS      bool
+		wantSecure  bool
+		wantSameSite http.SameSite
+	}{
+		{
+			name:         "HTTPS request sets secure cookie",
+			useTLS:       true,
+			wantSecure:   true,
+			wantSameSite: http.SameSiteLaxMode,
+		},
+		{
+			name:         "HTTP request sets non-secure cookie",
+			useTLS:       false,
+			wantSecure:   false,
+			wantSameSite: http.SameSiteLaxMode,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create test request
+			req := httptest.NewRequest(http.MethodGet, "/test", nil)
+			if tt.useTLS {
+				// Set TLS connection state to indicate HTTPS
+				req.TLS = &tls.ConnectionState{}
+			}
+
+			// Create response recorder
+			w := httptest.NewRecorder()
+
+			// Call setCSRFCookie
+			value, err := setCSRFCookie(w, req, "state")
+			if err != nil {
+				t.Fatalf("setCSRFCookie() error = %v", err)
+			}
+
+			if value == "" {
+				t.Error("setCSRFCookie() returned empty value")
+			}
+
+			// Get cookies from response
+			cookies := w.Result().Cookies()
+			if len(cookies) == 0 {
+				t.Fatal("No cookies set in response")
+			}
+
+			cookie := cookies[0]
+
+			// Verify HttpOnly is always true
+			if !cookie.HttpOnly {
+				t.Error("HttpOnly should always be true")
+			}
+
+			// Verify Secure flag matches TLS state
+			if cookie.Secure != tt.wantSecure {
+				t.Errorf("Secure = %v, want %v", cookie.Secure, tt.wantSecure)
+			}
+
+			// Verify SameSite is always set to Lax (critical security requirement)
+			if cookie.SameSite != tt.wantSameSite {
+				t.Errorf("SameSite = %v, want %v", cookie.SameSite, tt.wantSameSite)
+			}
+
+			// Verify cookie path
+			if cookie.Path != "/oidc/callback" {
+				t.Errorf("Path = %v, want /oidc/callback", cookie.Path)
+			}
+
+			// Verify MaxAge is set (1 hour)
+			if cookie.MaxAge <= 0 {
+				t.Errorf("MaxAge = %v, want > 0", cookie.MaxAge)
 			}
 		})
 	}

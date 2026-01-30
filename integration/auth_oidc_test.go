@@ -1,11 +1,14 @@
 package integration
 
 import (
+	"fmt"
 	"maps"
+	"net/http"
 	"net/netip"
 	"net/url"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -1914,4 +1917,155 @@ func TestOIDCReloginSameUserRoutesPreserved(t *testing.T) {
 		"BUG #2896: routes should remain SERVING after OIDC logout/relogin with same user")
 
 	t.Logf("Test completed - verifying issue #2896 fix for OIDC")
+}
+
+// TestOIDCCookieSecureFlagWithoutTLS validates that the Secure cookie flag
+// is NOT set when headscale is running without TLS (HTTP only).
+//
+// This test proves that:
+// - OIDC CSRF protection cookies (state, nonce) have proper security attributes
+// - The Secure flag is correctly set to false when r.TLS is nil
+// - SameSite and HttpOnly flags are always set regardless of TLS
+//
+// Security context:
+// - Secure flag should only be true for HTTPS connections (r.TLS != nil)
+// - Setting Secure=true on HTTP would prevent cookies from being sent
+// - This is important for development/testing environments without TLS
+func TestOIDCCookieSecureFlagWithoutTLS(t *testing.T) {
+	IntegrationSkip(t)
+
+	spec := ScenarioSpec{
+		NodesPerUser: 1,
+		Users:        []string{"user1"},
+		OIDCUsers: []mockoidc.MockUser{
+			oidcMockUser("user1", true),
+		},
+	}
+
+	scenario, err := NewScenario(spec)
+	require.NoError(t, err)
+
+	defer scenario.ShutdownAssertNoPanics(t)
+
+	oidcMap := map[string]string{
+		"HEADSCALE_OIDC_ISSUER":             scenario.mockOIDC.Issuer(),
+		"HEADSCALE_OIDC_CLIENT_ID":          scenario.mockOIDC.ClientID(),
+		"CREDENTIALS_DIRECTORY_TEST":        "/tmp",
+		"HEADSCALE_OIDC_CLIENT_SECRET_PATH": "${CREDENTIALS_DIRECTORY_TEST}/hs_client_oidc_secret",
+	}
+
+	// Create headscale WITHOUT TLS (HTTP only)
+	err = scenario.CreateHeadscaleEnvWithLoginURL(
+		nil,
+		hsic.WithTestName("oidccookienotls"),
+		hsic.WithConfigEnv(oidcMap),
+		// NOTE: WithTLS() is intentionally NOT called here
+		hsic.WithFileInContainer("/tmp/hs_client_oidc_secret", []byte(scenario.mockOIDC.ClientSecret())),
+	)
+	requireNoErrHeadscaleEnv(t, err)
+
+	headscale, err := scenario.Headscale()
+	require.NoError(t, err)
+
+	// Get a tailscale client to initiate OIDC registration
+	allClients, err := scenario.ListTailscaleClients()
+	requireNoErrListClients(t, err)
+	require.GreaterOrEqual(t, len(allClients), 1, "need at least one client")
+
+	tsClient := allClients["user1"]
+	require.NotNil(t, tsClient, "user1 client should exist")
+
+	// Start the OIDC registration flow to get the registration URL
+	loginURL, err := tsClient.LoginWithURL()
+	require.NoError(t, err, "failed to get login URL")
+	require.NotEmpty(t, loginURL, "login URL should not be empty")
+
+	t.Logf("Login URL: %s", loginURL)
+
+	// Parse the login URL to get the registration ID
+	parsedURL, err := url.Parse(loginURL)
+	require.NoError(t, err, "failed to parse login URL")
+
+	// The URL should be in format: http://headscale:8080/register/<registration_id>
+	pathParts := strings.Split(parsedURL.Path, "/")
+	require.GreaterOrEqual(t, len(pathParts), 3, "expected path format /register/<registration_id>")
+	require.Equal(t, "register", pathParts[1], "expected /register path")
+
+	registrationID := pathParts[2]
+	require.NotEmpty(t, registrationID, "registration ID should not be empty")
+
+	t.Logf("Registration ID: %s", registrationID)
+
+	// Make HTTP request to the OIDC registration endpoint WITHOUT TLS
+	// This should set cookies with Secure=false
+	endpoint := headscale.GetEndpoint()
+	require.Contains(t, endpoint, "http://", "endpoint should be HTTP (not HTTPS)")
+
+	registrationURL := fmt.Sprintf("%s/register/%s", endpoint, registrationID)
+	t.Logf("Making request to: %s", registrationURL)
+
+	// Create HTTP client that doesn't follow redirects (to capture Set-Cookie headers)
+	httpClient := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	resp, err := httpClient.Get(registrationURL)
+	require.NoError(t, err, "HTTP request to registration endpoint failed")
+	defer resp.Body.Close()
+
+	// The response should be a redirect to the OIDC provider
+	require.Equal(t, http.StatusFound, resp.StatusCode,
+		"expected redirect (302) to OIDC provider, got %d", resp.StatusCode)
+
+	// Verify Set-Cookie headers are present
+	cookies := resp.Cookies()
+	require.NotEmpty(t, cookies, "expected Set-Cookie headers to be present")
+
+	t.Logf("Received %d cookies", len(cookies))
+
+	// Look for state and nonce cookies
+	var stateCookie, nonceCookie *http.Cookie
+	for _, cookie := range cookies {
+		t.Logf("Cookie: Name=%s, Secure=%v, HttpOnly=%v, SameSite=%v",
+			cookie.Name, cookie.Secure, cookie.HttpOnly, cookie.SameSite)
+
+		if strings.Contains(cookie.Name, "state") {
+			stateCookie = cookie
+		}
+		if strings.Contains(cookie.Name, "nonce") {
+			nonceCookie = cookie
+		}
+	}
+
+	// Verify state cookie exists and has correct security attributes
+	require.NotNil(t, stateCookie, "state cookie should be present")
+	t.Logf("State cookie: Secure=%v, HttpOnly=%v, SameSite=%v",
+		stateCookie.Secure, stateCookie.HttpOnly, stateCookie.SameSite)
+
+	// CRITICAL: Verify Secure flag is FALSE for HTTP (no TLS)
+	assert.False(t, stateCookie.Secure,
+		"Secure flag should be FALSE when TLS is disabled (HTTP connection)")
+
+	// Verify other security flags are still set
+	assert.True(t, stateCookie.HttpOnly,
+		"HttpOnly flag should always be TRUE")
+	assert.Equal(t, http.SameSiteLaxMode, stateCookie.SameSite,
+		"SameSite should be Lax mode")
+
+	// Verify nonce cookie if present
+	if nonceCookie != nil {
+		t.Logf("Nonce cookie: Secure=%v, HttpOnly=%v, SameSite=%v",
+			nonceCookie.Secure, nonceCookie.HttpOnly, nonceCookie.SameSite)
+
+		assert.False(t, nonceCookie.Secure,
+			"Nonce cookie Secure flag should be FALSE when TLS is disabled")
+		assert.True(t, nonceCookie.HttpOnly,
+			"Nonce cookie HttpOnly flag should always be TRUE")
+		assert.Equal(t, http.SameSiteLaxMode, nonceCookie.SameSite,
+			"Nonce cookie SameSite should be Lax mode")
+	}
+
+	t.Logf("SUCCESS: Verified Secure flag is correctly set to false for HTTP (no TLS)")
 }
