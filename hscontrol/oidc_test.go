@@ -1,6 +1,9 @@
 package hscontrol
 
 import (
+	"crypto/tls"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/juanfont/headscale/hscontrol/types"
@@ -167,6 +170,90 @@ func TestDoOIDCAuthorization(t *testing.T) {
 			err := doOIDCAuthorization(tC.cfg, tC.claims)
 			if ((err != nil) && !tC.wantErr) || ((err == nil) && tC.wantErr) {
 				t.Errorf("bad authorization: %s > want=%v | got=%v", tC.name, tC.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestSetCSRFCookie(t *testing.T) {
+	tests := []struct {
+		name      string
+		useTLS    bool
+		wantAttrs map[string]bool
+	}{
+		{
+			name:   "HTTPS request sets secure cookie",
+			useTLS: true,
+			wantAttrs: map[string]bool{
+				"HttpOnly": true,
+				"Secure":   true,
+				"SameSite": true,
+			},
+		},
+		{
+			name:   "HTTP request sets non-secure cookie",
+			useTLS: false,
+			wantAttrs: map[string]bool{
+				"HttpOnly": true,
+				"Secure":   false,
+				"SameSite": true,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create test request
+			req := httptest.NewRequest(http.MethodGet, "/test", nil)
+			if tt.useTLS {
+				// Set TLS connection state to indicate HTTPS
+				req.TLS = &tls.ConnectionState{}
+			}
+
+			// Create response recorder
+			w := httptest.NewRecorder()
+
+			// Call setCSRFCookie
+			value, err := setCSRFCookie(w, req, "state")
+			if err != nil {
+				t.Fatalf("setCSRFCookie() error = %v", err)
+			}
+
+			if value == "" {
+				t.Error("setCSRFCookie() returned empty value")
+			}
+
+			// Get cookies from response
+			cookies := w.Result().Cookies()
+			if len(cookies) == 0 {
+				t.Fatal("No cookies set in response")
+			}
+
+			cookie := cookies[0]
+
+			// Verify cookie attributes
+			if cookie.HttpOnly != tt.wantAttrs["HttpOnly"] {
+				t.Errorf("HttpOnly = %v, want %v", cookie.HttpOnly, tt.wantAttrs["HttpOnly"])
+			}
+
+			if cookie.Secure != tt.wantAttrs["Secure"] {
+				t.Errorf("Secure = %v, want %v", cookie.Secure, tt.wantAttrs["Secure"])
+			}
+
+			if tt.wantAttrs["SameSite"] {
+				if cookie.SameSite != http.SameSiteLaxMode {
+					t.Errorf("SameSite = %v, want %v", cookie.SameSite, http.SameSiteLaxMode)
+				}
+			}
+
+			// Verify cookie path
+			if cookie.Path != "/oidc/callback" {
+				t.Errorf("Path = %v, want /oidc/callback", cookie.Path)
+			}
+
+			// Verify MaxAge is set (1 hour)
+			if cookie.MaxAge <= 0 {
+				t.Errorf("MaxAge = %v, want > 0", cookie.MaxAge)
 			}
 		})
 	}
