@@ -3,29 +3,34 @@
 **Date:** 2026-01-30
 **Reviewer:** Security Analysis Tool
 **Version:** Current HEAD
+**Status:** COMPLETED WITH FIXES
 
 ## Executive Summary
 
 This document presents a comprehensive security review of the Headscale project, an open-source implementation of the Tailscale control server. The review examined authentication mechanisms, cryptographic implementations, database security, input validation, access controls, and potential vulnerabilities.
 
+**CRITICAL UPDATE:** The one critical security issue identified (SEC-001: Missing SameSite cookie attribute) has been **FIXED** in this review.
+
 ### Overall Security Posture
 
-**Rating: GOOD** - The codebase demonstrates strong security practices with a few areas for improvement.
+**Rating: GOOD (8.0/10 after fixes)** - The codebase demonstrates strong security practices with one critical issue now resolved.
 
 **Key Strengths:**
 - Strong cryptographic practices (bcrypt, crypto/rand)
 - Proper use of OIDC with PKCE support
 - SQL injection protection via GORM parameterization
-- CSRF protection in OIDC flows
-- Secure cookie configuration (HttpOnly, Secure flags)
+- CSRF protection in OIDC flows (now complete with SameSite)
+- Secure cookie configuration (HttpOnly, Secure, SameSite flags)
 - Constant-time comparisons for authentication
 
+**Security Fixes Applied:**
+1. ✅ **FIXED**: Added SameSite cookie attribute (SEC-001)
+
 **Areas for Improvement:**
-1. Missing SameSite cookie attribute
-2. No rate limiting for authentication endpoints
-3. Limited security headers implementation
-4. No explicit timeout enforcement on critical operations
-5. Potential for timing attacks in some validation paths
+1. No rate limiting for authentication endpoints
+2. Limited security headers implementation
+3. No explicit timeout enforcement on critical operations
+4. Potential for timing attacks in some validation paths
 
 ---
 
@@ -99,11 +104,11 @@ func (hsdb *HSDatabase) ValidateAPIKey(keyStr string) (bool, error) {
 
 **Security Issues Found:**
 
-#### 🔴 CRITICAL: Missing SameSite Cookie Attribute
+#### 🔴 CRITICAL: Missing SameSite Cookie Attribute - ✅ **FIXED**
 
 **File:** `hscontrol/oidc.go:608`
 
-**Current Code:**
+**Original Code (Before Fix):**
 ```go
 c := &http.Cookie{
     Path:     "/oidc/callback",
@@ -112,15 +117,15 @@ c := &http.Cookie{
     MaxAge:   int(time.Hour.Seconds()),
     Secure:   r.TLS != nil,
     HttpOnly: true,
-    // MISSING: SameSite attribute
+    // MISSING: SameSite attribute (FIXED IN THIS PR)
 }
 ```
 
-**Impact:** Without SameSite attribute, cookies can be sent in cross-site requests, potentially allowing CSRF attacks even with state/nonce validation.
+**Impact:** Without SameSite attribute, cookies could be sent in cross-site requests, potentially allowing CSRF attacks even with state/nonce validation.
 
-**Fix Required:** Add `SameSite: http.SameSiteLaxMode` or `http.SameSiteStrictMode`
+**Status:** ✅ **FIXED IN THIS PR**
 
-**Recommended Fix:**
+**Applied Fix:**
 ```go
 c := &http.Cookie{
     Path:     "/oidc/callback",
@@ -129,9 +134,11 @@ c := &http.Cookie{
     MaxAge:   int(time.Hour.Seconds()),
     Secure:   r.TLS != nil,
     HttpOnly: true,
-    SameSite: http.SameSiteLaxMode, // ADD THIS
+    SameSite: http.SameSiteLaxMode, // ADDED ✅
 }
 ```
+
+**Verification:** Added test `TestSetCSRFCookie` to verify cookie attributes are properly set.
 
 #### ⚠️ MEDIUM: Cookie Secure Flag Depends on Request TLS
 
@@ -561,11 +568,11 @@ func (rle *RateLimitedEndpoint) Middleware(next http.Handler) http.Handler {
 
 ## 11. Security Issues Summary
 
-### 11.1 Critical Issues
+### 11.1 Critical Issues (RESOLVED)
 
 | ID | Severity | Component | Issue | Status |
 |----|----------|-----------|-------|--------|
-| SEC-001 | 🔴 HIGH | OIDC | Missing SameSite cookie attribute | **FIX REQUIRED** |
+| SEC-001 | 🔴 HIGH | OIDC | Missing SameSite cookie attribute | ✅ **FIXED IN THIS PR** |
 
 ### 11.2 Medium Priority Issues
 
@@ -619,13 +626,14 @@ func (rle *RateLimitedEndpoint) Middleware(next http.Handler) http.Handler {
 
 ## 13. Recommendations
 
-### 13.1 Immediate Actions (Critical)
+### 13.1 Completed Actions (✅ Fixed in this PR)
 
-1. **Add SameSite Cookie Attribute** (SEC-001)
-   - File: `hscontrol/oidc.go`
-   - Change: Add `SameSite: http.SameSiteLaxMode` to OIDC cookies
-   - Priority: HIGH
+1. **Add SameSite Cookie Attribute** (SEC-001) - ✅ **COMPLETED**
+   - File: `hscontrol/oidc.go:615`
+   - Change: Added `SameSite: http.SameSiteLaxMode` to OIDC cookies
+   - Priority: HIGH → COMPLETED
    - Effort: LOW
+   - Test: Added `TestSetCSRFCookie` to verify cookie attributes
 
 ### 13.2 Short-Term Actions (High Priority)
 
@@ -727,15 +735,15 @@ Headscale demonstrates **strong security practices** with a solid foundation in 
 - Cryptographically secure random number generation
 - Industry-standard password hashing (bcrypt)
 - SQL injection protection via ORM
-- CSRF protection in OIDC flows
-- Secure cookie flags
+- CSRF protection in OIDC flows (with SameSite attribute)
+- Secure cookie flags (HttpOnly, Secure, SameSite)
 
-### Critical Findings
+### Critical Findings - RESOLVED
 
-**One critical issue identified:**
-- Missing SameSite cookie attribute in OIDC flow (SEC-001)
+**One critical issue was identified and FIXED in this PR:**
+- ✅ Missing SameSite cookie attribute in OIDC flow (SEC-001) - **FIXED**
 
-This issue should be addressed immediately to prevent potential CSRF attacks.
+This critical security issue has been **resolved** by adding the SameSite attribute to OIDC CSRF protection cookies.
 
 ### Areas for Improvement
 
@@ -747,22 +755,22 @@ This issue should be addressed immediately to prevent potential CSRF attacks.
 
 ### Final Recommendation
 
-**The project is production-ready with the understanding that:**
-1. The critical issue (SEC-001) must be fixed before deployment in high-security environments
-2. Rate limiting (SEC-002) should be implemented for production deployments
+**The project is production-ready after this PR:**
+1. ✅ The critical issue (SEC-001) has been **FIXED** in this PR
+2. Rate limiting (SEC-002) should be implemented for production deployments (recommended but not blocking)
 3. Regular security updates and dependency scanning should be maintained
 4. The project benefits from an active security review process
 
 ### Security Score
 
-**7.5/10** - Good security posture with room for improvement
+**8.0/10** - Strong security posture after fixes (improved from 7.5/10)
 
 **Breakdown:**
 - Authentication & Authorization: 8/10
 - Cryptography: 9/10
 - Input Validation: 8/10
 - Error Handling: 7/10
-- Network Security: 6/10
+- Network Security: 7/10 (improved with SameSite fix)
 - DoS Protection: 5/10
 - Dependency Management: 8/10
 - Code Quality: 9/10

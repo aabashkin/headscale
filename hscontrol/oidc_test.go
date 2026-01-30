@@ -177,27 +177,22 @@ func TestDoOIDCAuthorization(t *testing.T) {
 
 func TestSetCSRFCookie(t *testing.T) {
 	tests := []struct {
-		name      string
-		useTLS    bool
-		wantAttrs map[string]bool
+		name        string
+		useTLS      bool
+		wantSecure  bool
+		wantSameSite http.SameSite
 	}{
 		{
-			name:   "HTTPS request sets secure cookie",
-			useTLS: true,
-			wantAttrs: map[string]bool{
-				"HttpOnly": true,
-				"Secure":   true,
-				"SameSite": true,
-			},
+			name:         "HTTPS request sets secure cookie",
+			useTLS:       true,
+			wantSecure:   true,
+			wantSameSite: http.SameSiteLaxMode,
 		},
 		{
-			name:   "HTTP request sets non-secure cookie",
-			useTLS: false,
-			wantAttrs: map[string]bool{
-				"HttpOnly": true,
-				"Secure":   false,
-				"SameSite": true,
-			},
+			name:         "HTTP request sets non-secure cookie",
+			useTLS:       false,
+			wantSecure:   false,
+			wantSameSite: http.SameSiteLaxMode,
 		},
 	}
 
@@ -231,19 +226,19 @@ func TestSetCSRFCookie(t *testing.T) {
 
 			cookie := cookies[0]
 
-			// Verify cookie attributes
-			if cookie.HttpOnly != tt.wantAttrs["HttpOnly"] {
-				t.Errorf("HttpOnly = %v, want %v", cookie.HttpOnly, tt.wantAttrs["HttpOnly"])
+			// Verify HttpOnly is always true
+			if !cookie.HttpOnly {
+				t.Error("HttpOnly should always be true")
 			}
 
-			if cookie.Secure != tt.wantAttrs["Secure"] {
-				t.Errorf("Secure = %v, want %v", cookie.Secure, tt.wantAttrs["Secure"])
+			// Verify Secure flag matches TLS state
+			if cookie.Secure != tt.wantSecure {
+				t.Errorf("Secure = %v, want %v", cookie.Secure, tt.wantSecure)
 			}
 
-			if tt.wantAttrs["SameSite"] {
-				if cookie.SameSite != http.SameSiteLaxMode {
-					t.Errorf("SameSite = %v, want %v", cookie.SameSite, http.SameSiteLaxMode)
-				}
+			// Verify SameSite is always set to Lax (critical security requirement)
+			if cookie.SameSite != tt.wantSameSite {
+				t.Errorf("SameSite = %v, want %v", cookie.SameSite, tt.wantSameSite)
 			}
 
 			// Verify cookie path
